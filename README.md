@@ -62,16 +62,6 @@ Other agents (and `resources/read`) can resolve these to the current value of th
 - **Units transformation**: `units` parameter computes derived series at request time (`pch` for percent change, `pca` for compound annual rate, etc.). Don't compute these client-side; let FRED do it.
 - **Series renamed**: occasionally the Fed deprecates a series and creates a successor. Old IDs return errors. `fred_search` is the recovery path.
 
-## No MCP client? Call it over HTTP
-
-```bash
-curl -X POST https://gateway.pipeworx.io/v1/tools/fred_get_series \
-  -H 'Content-Type: application/json' \
-  -d '{"series_id":"MORTGAGE30US"}'
-```
-
-No account needed for the first calls. Inspect any tool — schema, examples, cost — with `GET https://gateway.pipeworx.io/v1/tools/fred_get_series`. Find one with `POST https://gateway.pipeworx.io/v1/tools/search_packs` and `{"query":"..."}`. Errors come back as JSON with a `retry_hint`.
-
 ## Quick Start
 
 Add to your MCP client (Claude Desktop, Cursor, Windsurf, etc.):
