@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pipeworx-io/fred",
-  "title": "fred",
+  "title": "Fred",
   "description": "FRED MCP — Federal Reserve Economic Data (St. Louis Fed)",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "websiteUrl": "https://pipeworx.io/packs/fred",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-fred",

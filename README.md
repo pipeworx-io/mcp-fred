@@ -2,7 +2,7 @@
 
 The St. Louis Fed's data warehouse: 800,000+ economic time series spanning interest rates, inflation, employment, GDP, money supply, exchange rates, and metro-level indicators. The most authoritative, continuously updated source for US macro and monetary data — used by economists, policymakers, and journalists.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1476+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1679+ live data sources.
 
 ## Why this matters for AI agents
 
@@ -55,6 +55,24 @@ pipeworx://fred/series/{series_id}/observations
 
 Other agents (and `resources/read`) can resolve these to the current value of the series.
 
+## Reading a `fred_get_series` response
+
+| Field | What it is |
+|---|---|
+| `count` | How many observations FRED holds for the requested window. |
+| `returned` | How many are in `observations` — `limit` caps this at 20 by default. |
+| `truncated` | True when `returned < count`; `note` says so in words. |
+| `observation_order` | `newest_first` (default) or `oldest_first` (`sort_order: "asc"`). |
+| `observation_start` / `observation_end` | The series' **real coverage**, from FRED's series metadata. |
+| `requested_start` / `requested_end` | The window you asked for. Absent when you asked for none. |
+
+The last two rows are the one to know about. FRED's observations endpoint echoes
+`observation_start`/`observation_end` back as it received them, and substitutes
+`1600-01-01` / `9999-12-31` when the caller sets neither — so this pack used to
+report that US GDP ran from 1600 through 9999. Those names now carry the coverage
+from the series metadata, matching what `fred_series_info` and `fred_search`
+already mean by them.
+
 ## Common pitfalls
 
 - **Vintages**: FRED preserves historical "vintages" (data as it was reported at time T). Default tool calls get the latest revised series. Pass `realtime_start` and `realtime_end` for as-of queries.
@@ -106,9 +124,45 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1476+ data sources. The
+Both URLs reach the same gateway and the same 1679+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
+
+## No MCP client? Call it over HTTP
+
+```bash
+curl -X POST https://gateway.pipeworx.io/v1/tools/fred_get_series \
+  -H 'Content-Type: application/json' \
+  -d '{"series_id":"MORTGAGE30US"}'
+```
+
+No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/fred_get_series`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
+
+## Standalone (no gateway account)
+
+This package also runs as a local stdio MCP server — no Pipeworx account, no
+gateway round-trip:
+
+```json
+{
+  "mcpServers": {
+    "fred": {
+      "command": "npx",
+      "args": ["-y", "@pipeworx/mcp-fred"]
+    }
+  }
+}
+```
+
+Or run it directly to confirm it starts:
+
+```bash
+npx -y @pipeworx/mcp-fred
+```
+
+It speaks MCP over stdin/stdout and answers `initialize`/`tools/list`/`tools/call`
+for **only** this pack's tools — none of the shared meta-tools the gateway
+connection above adds. Same source, same tools, no ask_pipeworx routing.
 
 ## Using with ask_pipeworx
 
@@ -129,13 +183,3 @@ The gateway picks the right tool and fills the arguments automatically.
 ## License
 
 MIT
-
-## No MCP client? Call it over HTTP
-
-```bash
-curl -X POST https://gateway.pipeworx.io/v1/tools/fred_get_series \
-  -H 'Content-Type: application/json' \
-  -d '{"series_id":"MORTGAGE30US"}'
-```
-
-No account needed for the first calls. Inspect any tool: `GET https://gateway.pipeworx.io/v1/tools/fred_get_series`. Find one: `POST https://gateway.pipeworx.io/v1/tools/search_packs` with `{"query":"..."}`.
