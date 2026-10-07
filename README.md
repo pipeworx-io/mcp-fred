@@ -2,7 +2,7 @@
 
 The St. Louis Fed's data warehouse: 800,000+ economic time series spanning interest rates, inflation, employment, GDP, money supply, exchange rates, and metro-level indicators. The most authoritative, continuously updated source for US macro and monetary data — used by economists, policymakers, and journalists.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1683+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1704+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Why this matters for AI agents
 
@@ -55,6 +55,45 @@ pipeworx://fred/series/{series_id}/observations
 
 Other agents (and `resources/read`) can resolve these to the current value of the series.
 
+## ALFRED vintages: "what did this number say on date X"
+
+FRED revises most series after first publication (GDP, payrolls, retail sales…).
+`fred_get_series` defaults to the latest revised values — pass one of these to
+ask for an earlier vintage instead:
+
+- `as_of: "2020-03-15"` — the data exactly as it stood on that date. Shorthand
+  for `realtime_start = realtime_end = as_of`.
+- `realtime_start` / `realtime_end` — an explicit publication window, for the
+  rarer case of a custom range rather than a single date.
+
+Omitting all three is the default and is unchanged: no `vintage` field, same
+values as before this parameter existed. Passing any of them adds a `vintage`
+object to the response (`{as_of, realtime_start, realtime_end}`) so you can
+tell which vintage you're looking at.
+
+```js
+fred_get_series({ series_id: "GDPC1", as_of: "2024-01-15", limit: 1 })
+// -> the GDP print as FRED had it published on 2024-01-15, before later revisions
+```
+
+Two more tools cover the revision history directly:
+
+- **`fred_vintage_dates({ series_id })`** — every date FRED published a new
+  vintage of the series (initial release or a later revision).
+- **`fred_revisions({ series_id, observation_date })`** — how ONE observation's
+  value changed across every vintage, from `first_release` to `latest`. Use
+  this on revision-prone series (GDP `GDPC1`, payrolls `PAYEMS`) to see the
+  originally reported number versus today's.
+
+```js
+fred_revisions({ series_id: "GDPC1", observation_date: "2023-10-01" })
+// -> revisions: [{ vintage_date: "2023-10-26", value: "22490.692" }, ...]
+//    one entry per ALFRED vintage, oldest first; first_release is the
+//    earliest, latest the most recent. Consecutive vintages can repeat the
+//    same value — compare first_release.value to latest.value to see
+//    whether this observation was ever actually revised.
+```
+
 ## Reading a `fred_get_series` response
 
 | Field | What it is |
@@ -75,7 +114,7 @@ already mean by them.
 
 ## Common pitfalls
 
-- **Vintages**: FRED preserves historical "vintages" (data as it was reported at time T). Default tool calls get the latest revised series. Pass `realtime_start` and `realtime_end` for as-of queries.
+- **Vintages**: FRED preserves historical "vintages" (data as it was reported at time T). Default tool calls get the latest revised series. Pass `as_of` (or `realtime_start`/`realtime_end`) to `fred_get_series` for as-of queries, or use `fred_revisions` to see the full history of one observation.
 - **Frequency aggregation**: `frequency` parameter coerces to a different cadence (e.g., daily → monthly average). Default is the series' native frequency.
 - **Units transformation**: `units` parameter computes derived series at request time (`pch` for percent change, `pca` for compound annual rate, etc.). Don't compute these client-side; let FRED do it.
 - **Series renamed**: occasionally the Fed deprecates a series and creates a successor. Old IDs return errors. `fred_search` is the recovery path.
@@ -124,7 +163,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1683+ data sources. The
+Both URLs reach the same gateway and the same 1704+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

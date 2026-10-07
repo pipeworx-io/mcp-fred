@@ -678,10 +678,15 @@ function collapse(s: string): string {
  *
  * Tools:
  * - fred_get_series: get observations for a data series (e.g., MORTGAGE30US, HOUST, CSUSHPISA)
+ *   accepts `as_of` (or explicit realtime_start/realtime_end) for ALFRED "as published on
+ *   date X" vintage queries; default (no vintage args) behavior is unchanged.
  * - fred_search: search for series by keyword
  * - fred_series_info: get metadata about a series
  * - fred_category: browse FRED categories
  * - fred_releases: get latest data releases
+ * - fred_release_dates: release calendar (past + scheduled)
+ * - fred_vintage_dates: every ALFRED vintage (revision) date for a series
+ * - fred_revisions: how one observation's value changed across vintages (first release -> latest)
  */
 
 
@@ -765,9 +770,43 @@ const tools: McpToolExport['tools'] = [
         // a caller who wants a series in chronological order can ask for it
         // instead of reversing a truncated tail (fleet #718).
         sort_order: { type: 'string', description: 'Observation order: desc = newest first (default), asc = oldest first.', enum: ['asc', 'desc'] },
+        as_of: { type: 'string', description: 'ALFRED vintage query: return the data as it was PUBLISHED on this date (YYYY-MM-DD), before any later revisions. Shorthand for realtime_start=realtime_end=as_of. Omit for the default: today\'s latest-revised values (unchanged from before this parameter existed).' },
+        realtime_start: { type: 'string', description: 'ALFRED vintage query: start of the realtime (publication) window, YYYY-MM-DD. Use with realtime_end for a custom vintage range; use `as_of` for the common single-date case. Omit for the default latest-revised behavior.' },
+        realtime_end: { type: 'string', description: 'ALFRED vintage query: end of the realtime (publication) window, YYYY-MM-DD. See realtime_start.' },
         _apiKey: { type: 'string', description: 'FRED API key' },
       },
       required: ['series_id', '_apiKey'],
+    },
+  },
+  {
+    name: 'fred_vintage_dates',
+    description:
+      'ALFRED revision history: every date FRED published a new vintage (initial release or a later revision) of a series. Use before fred_revisions to see which dates have a distinct vintage, or pass one of these dates as `as_of`/`realtime_start`+`realtime_end` to fred_get_series to get the data as it stood on that date.',
+    summary: 'The ALFRED vintage (revision) dates for one FRED series, from the St. Louis Fed.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        series_id: { type: 'string', description: 'FRED series ID (e.g., "GDPC1", "PAYEMS")' },
+        limit: { type: 'number', description: 'Max vintage dates to return (1-10000, default 100)' },
+        sort_order: { type: 'string', description: 'asc = oldest vintage first, desc = newest vintage first (default desc)', enum: ['asc', 'desc'] },
+        _apiKey: { type: 'string', description: 'FRED API key' },
+      },
+      required: ['series_id', '_apiKey'],
+    },
+  },
+  {
+    name: 'fred_revisions',
+    description:
+      'How ONE observation (one date) in a FRED series was revised over time, from first release through every later vintage to the latest. Use on series that get revised after initial publication (e.g. GDP "GDPC1", payrolls "PAYEMS") to see the originally reported value versus the current one. Returns every ALFRED vintage on record for that observation, oldest first — consecutive vintages can repeat the same value, so compare `first_release.value` to `latest.value` (or scan `revisions`) to see whether it was ever actually revised.',
+    summary: 'The revision history of one observation in a FRED series, across every ALFRED vintage.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        series_id: { type: 'string', description: 'FRED series ID (e.g., "GDPC1", "PAYEMS")' },
+        observation_date: { type: 'string', description: 'The observation date to trace revisions for, YYYY-MM-DD (must match an actual observation date in the series — e.g. the first day of the quarter for quarterly series).' },
+        _apiKey: { type: 'string', description: 'FRED API key' },
+      },
+      required: ['series_id', 'observation_date', '_apiKey'],
     },
   },
   {
@@ -866,6 +905,10 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       return getReleases(key, args);
     case 'fred_release_dates':
       return getReleaseDates(key, args);
+    case 'fred_vintage_dates':
+      return getVintageDates(key, args);
+    case 'fred_revisions':
+      return getRevisions(key, args);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -894,8 +937,23 @@ function normalizeFredFrequency(v: unknown): string | null {
 
 // ── Tool implementations ────────────────────────────────────────────────
 
+// ALFRED vintage args. `as_of` is shorthand for realtime_start=realtime_end=as_of;
+// explicit realtime_start/realtime_end (either or both) take precedence over
+// `as_of` when present, so a caller can set a custom window. Absent all three,
+// this returns {} and callers of getSeries set nothing extra on the request —
+// which is the point: default behavior must stay byte-for-byte unchanged.
+function resolveVintageArgs(args: Record<string, unknown>): { realtimeStart?: string; realtimeEnd?: string; asOf?: string } {
+  const realtimeStart = args.realtime_start as string | undefined;
+  const realtimeEnd = args.realtime_end as string | undefined;
+  const asOf = args.as_of as string | undefined;
+  if (realtimeStart || realtimeEnd) return { realtimeStart, realtimeEnd };
+  if (asOf) return { realtimeStart: asOf, realtimeEnd: asOf, asOf };
+  return {};
+}
+
 async function getSeries(key: string, args: Record<string, unknown>) {
   const seriesId = args.series_id as string;
+  const { realtimeStart, realtimeEnd, asOf } = resolveVintageArgs(args);
   const params = new URLSearchParams({
     series_id: seriesId,
     api_key: key,
@@ -908,6 +966,8 @@ async function getSeries(key: string, args: Record<string, unknown>) {
     if (f) params.set('frequency', f); // unknown → drop, return native frequency (don't 400)
   }
   if (args.units) params.set('units', args.units as string);
+  if (realtimeStart) params.set('realtime_start', realtimeStart);
+  if (realtimeEnd) params.set('realtime_end', realtimeEnd);
   // FRED's observations API defaults to sort_order=asc + ALL observations, so a
   // bare fred_get_series(UNRATE) returned the full series from 1948 OLDEST-first
   // and ignored the documented `limit: 20` — agents read a decades-old value,
@@ -917,6 +977,8 @@ async function getSeries(key: string, args: Record<string, unknown>) {
   params.set('limit', String(Math.min(100000, Math.max(1, (args.limit as number) ?? 20))));
 
   const infoParams = new URLSearchParams({ series_id: seriesId, api_key: key, file_type: 'json' });
+  if (realtimeStart) infoParams.set('realtime_start', realtimeStart);
+  if (realtimeEnd) infoParams.set('realtime_end', realtimeEnd);
   const [data, infoRaw] = await Promise.all([
     fredFetch(`${BASE}/series/observations?${params}`) as Promise<{
       realtime_start: string;
@@ -953,6 +1015,8 @@ async function getSeries(key: string, args: Record<string, unknown>) {
       if (f) p2.set('frequency', f);
     }
     if (args.units) p2.set('units', args.units as string);
+    if (realtimeStart) p2.set('realtime_start', realtimeStart);
+    if (realtimeEnd) p2.set('realtime_end', realtimeEnd);
     const retry = (await fredFetch(`${BASE}/series/observations?${p2}`)) as typeof data;
     if (retry.observations.length > 0) {
       obs = retry;
@@ -1013,6 +1077,18 @@ async function getSeries(key: string, args: Record<string, unknown>) {
     ...(infoRaw?.observation_end ? { observation_end: infoRaw.observation_end } : {}),
     ...(args.observation_start ? { requested_start: args.observation_start as string } : {}),
     ...(args.observation_end ? { requested_end: args.observation_end as string } : {}),
+    // Only present when the caller asked for a vintage — absence here (and
+    // everywhere above) is what keeps the no-args response byte-for-byte
+    // identical to before this field existed.
+    ...(realtimeStart || realtimeEnd
+      ? {
+          vintage: {
+            ...(asOf ? { as_of: asOf } : {}),
+            ...(realtimeStart ? { realtime_start: realtimeStart } : {}),
+            ...(realtimeEnd ? { realtime_end: realtimeEnd } : {}),
+          },
+        }
+      : {}),
     observations: rows,
   };
 }
@@ -1204,6 +1280,112 @@ async function getReleaseDates(key: string, args: Record<string, unknown>) {
     note: single ? undefined : 'Cross-release calendar returns RECENT releases. For an upcoming schedule / next release date, pass a release_id (from fred_releases).',
     upcoming: upcoming.slice(0, cap).map(shape),
     recent: recent.slice(0, cap).map(shape),
+  };
+}
+
+async function getVintageDates(key: string, args: Record<string, unknown>) {
+  const seriesId = args.series_id as string;
+  const cap = Math.min(10000, Math.max(1, (args.limit as number) ?? 100));
+  const sortOrder = (args.sort_order as string) === 'asc' ? 'asc' : 'desc';
+  const params = new URLSearchParams({
+    series_id: seriesId,
+    api_key: key,
+    file_type: 'json',
+    sort_order: sortOrder,
+    limit: '10000', // FRED's own cap; we slice to the caller's `limit` ourselves so `truncated` is honest
+  });
+
+  const data = (await fredFetch(`${BASE}/series/vintagedates?${params}`)) as {
+    count: number;
+    vintage_dates: string[];
+  };
+
+  const all = data.vintage_dates ?? [];
+  const returned = all.slice(0, cap);
+  const truncated = returned.length < all.length;
+  return {
+    series_id: seriesId,
+    total_vintages: typeof data.count === 'number' ? data.count : all.length,
+    returned: returned.length,
+    truncated,
+    ...(truncated
+      ? { note: `Showing ${returned.length} of ${all.length} vintage dates (${sortOrder === 'desc' ? 'newest first' : 'oldest first'}); raise \`limit\` for more.` }
+      : {}),
+    vintage_dates: returned,
+  };
+}
+
+// FRED's output_type=2 ("Observations by Vintage Date, All Observations")
+// does NOT return one row per vintage — verified against the live response
+// (2026-10-07, after shipping a first version that assumed it did and got
+// `{}` back for every vintage). It returns ONE ROW for the requested
+// observation_date, with the date in `date` and one EXTRA COLUMN PER VINTAGE,
+// named `<SERIES_ID>_<YYYYMMDD>` — e.g. `{ date: "2023-07-01",
+// GDPC1_20231026: "22490.692", GDPC1_20231129: "22475.212", ... }`. A missing
+// vintage column's value is FRED's usual "." null marker, not absence.
+const VINTAGE_COLUMN = /^.+_(\d{8})$/;
+
+function parseVintageRow(row: Record<string, string>): { vintage_date: string; value: string | null }[] {
+  const out: { vintage_date: string; value: string | null }[] = [];
+  for (const [col, raw] of Object.entries(row)) {
+    const m = col.match(VINTAGE_COLUMN);
+    if (!m) continue; // `date` itself, or any non-vintage field FRED adds
+    const ymd = m[1];
+    const vintageDate = `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`;
+    out.push({ vintage_date: vintageDate, value: raw === '.' ? null : raw });
+  }
+  out.sort((a, b) => a.vintage_date.localeCompare(b.vintage_date));
+  return out;
+}
+
+async function getRevisions(key: string, args: Record<string, unknown>) {
+  const seriesId = args.series_id as string;
+  const observationDate = args.observation_date as string;
+  // Pinning observation_start=observation_end=observationDate and spanning the
+  // full realtime range (FRED's documented earliest/latest sentinels) returns
+  // the whole revision history of one observation in a single call — no need
+  // to walk fred_vintage_dates and refetch per date.
+  //
+  // realtime_end must be FRED's documented max sentinel (9999-12-31), NOT
+  // `new Date()`-derived "today" — FRED 400s "Variable realtime_end can not be
+  // after today's date … unless it's equal to the real-time max date 9999-12-31"
+  // whenever the CALLER's UTC day has already rolled past FRED's Central-time
+  // day (reproduced live post-deploy on 2026-10-07: the gateway's UTC day was
+  // 10-07 while FRED still considered it 10-06). The sentinel means "no upper
+  // bound" to FRED, so it also means we never need to recompute it again.
+  const params = new URLSearchParams({
+    series_id: seriesId,
+    api_key: key,
+    file_type: 'json',
+    observation_start: observationDate,
+    observation_end: observationDate,
+    realtime_start: '1776-07-04', // FRED's documented sentinel for "earliest possible"
+    realtime_end: '9999-12-31', // FRED's documented sentinel for "latest possible" — never "today"
+    output_type: '2',
+  });
+
+  const data = (await fredFetch(`${BASE}/series/observations?${params}`)) as {
+    observations: Record<string, string>[];
+  };
+
+  const rows = data.observations ?? [];
+  const row = rows.find((o) => o.date === observationDate) ?? rows[0];
+  const revisions = row ? parseVintageRow(row) : [];
+
+  return {
+    series_id: seriesId,
+    observation_date: observationDate,
+    // The number of ALFRED VINTAGES on record for this observation — NOT how
+    // many times the value actually changed. Consecutive vintages can (and
+    // often do) repeat the same value; compare first_release.value to
+    // latest.value, or scan `revisions`, to see whether it was ever revised.
+    revisions_count: revisions.length,
+    ...(revisions.length === 0
+      ? { note: `No observation found for ${observationDate} on ${seriesId} — confirm the date matches an actual observation (e.g. the first day of the period for quarterly/monthly series), or call fred_get_series first.` }
+      : {}),
+    first_release: revisions[0] ?? null,
+    latest: revisions[revisions.length - 1] ?? null,
+    revisions,
   };
 }
 
