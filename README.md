@@ -2,7 +2,7 @@
 
 The St. Louis Fed's data warehouse: 800,000+ economic time series spanning interest rates, inflation, employment, GDP, money supply, exchange rates, and metro-level indicators. The most authoritative, continuously updated source for US macro and monetary data — used by economists, policymakers, and journalists.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1704+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1831+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
 
 ## Why this matters for AI agents
 
@@ -112,6 +112,31 @@ report that US GDP ran from 1600 through 9999. Those names now carry the coverag
 from the series metadata, matching what `fred_series_info` and `fred_search`
 already mean by them.
 
+## Regional Fed nowcasts (keyless, not FRED series)
+
+Two tools in this pack proxy regional Federal Reserve Bank websites directly
+rather than the St. Louis Fed's API — neither series exists in FRED's own
+catalog, confirmed by `fred_search` before building. No `_apiKey` needed.
+
+- **`nyfed_gdp_nowcast()`** — the Federal Reserve Bank of New York's weekly
+  real GDP growth nowcast for the quarter(s) it is currently tracking, with
+  50%/80% probability intervals, the publisher's own narrative, and recent
+  concluded quarters' final nowcast versus the actual BEA GDP print. Updated
+  every Friday.
+- **`cleveland_fed_inflation_nowcast()`** — the Federal Reserve Bank of
+  Cleveland's daily CPI/PCE inflation nowcast (headline and core), as
+  month-over-month, year-over-year, and quarterly-annualized figures. A blank
+  cell means the official BLS/BEA release for that period already exists.
+  Updated every business day.
+
+```js
+nyfed_gdp_nowcast({})
+// -> current_estimates: [{ quarter: "2026:Q3", nowcast_pct: 2.7, ... }, { quarter: "2026:Q4", nowcast_pct: 2.8 }]
+
+cleveland_fed_inflation_nowcast({})
+// -> current: { month: "October 2026", month_over_month_pct: { cpi: 0.27, ... }, year_over_year_pct: { cpi: 3.77, ... } }
+```
+
 ## Common pitfalls
 
 - **Vintages**: FRED preserves historical "vintages" (data as it was reported at time T). Default tool calls get the latest revised series. Pass `as_of` (or `realtime_start`/`realtime_end`) to `fred_get_series` for as-of queries, or use `fred_revisions` to see the full history of one observation.
@@ -163,7 +188,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1704+ data sources. The
+Both URLs reach the same gateway and the same 1831+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 

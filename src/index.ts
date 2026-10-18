@@ -687,10 +687,22 @@ function collapse(s: string): string {
  * - fred_release_dates: release calendar (past + scheduled)
  * - fred_vintage_dates: every ALFRED vintage (revision) date for a series
  * - fred_revisions: how one observation's value changed across vintages (first release -> latest)
+ *
+ * - nyfed_gdp_nowcast / cleveland_fed_inflation_nowcast (added fleet #3239):
+ *   KEYLESS — neither series is mirrored in FRED itself (confirmed by search
+ *   before building: fred_search has no GDP-nowcast or inflation-nowcast
+ *   series), so these proxy each regional Fed's own published page directly
+ *   rather than going through the St. Louis Fed's API. No _apiKey required;
+ *   dispatched before extractKey() below so a caller doesn't need a FRED key
+ *   to use them.
  */
 
 
 const BASE = 'https://api.stlouisfed.org/fred';
+
+// Tool names that do NOT require a FRED API key — dispatched in callTool()
+// before extractKey() runs, so a missing _apiKey never blocks them.
+const KEYLESS_TOOLS = new Set(['nyfed_gdp_nowcast', 'cleveland_fed_inflation_nowcast']);
 
 function extractKey(args: Record<string, unknown>): string {
   const key = args._apiKey as string;
@@ -885,11 +897,34 @@ const tools: McpToolExport['tools'] = [
       required: ['_apiKey'],
     },
   },
+  {
+    name: 'nyfed_gdp_nowcast',
+    description:
+      'The New York Fed Staff Nowcast — a weekly real GDP growth nowcast for the currently-tracked US quarter(s), from the Federal Reserve Bank of New York (keyless, NOT a FRED series — FRED\'s own catalog does not carry this). Answers "what is the NY Fed GDP nowcast", "current GDP growth estimate", "is the economy growing this quarter". Returns the headline nowcast percentage (annualized QoQ) for the quarter(s) actively being tracked (typically the most recent quarter awaiting its official BEA GDP release, plus the quarter in progress), with 50%/80% probability intervals where published, the publisher\'s own narrative explaining what moved the estimate this week, and recent CONCLUDED quarters\' final nowcast versus the actual BEA advance/latest GDP print. Updated every Friday (except federal holidays).',
+    summary: 'This week\'s New York Fed real GDP growth nowcast, with the narrative behind the number.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        include_history: { type: 'boolean', description: 'Include recent CONCLUDED quarters (final nowcast vs. actual BEA GDP). Default true.' },
+        history_quarters: { type: 'number', description: 'How many concluded quarters of history to include (default 6, max 20). Ignored if include_history is false.' },
+      },
+    },
+  },
+  {
+    name: 'cleveland_fed_inflation_nowcast',
+    description:
+      'Daily CPI and PCE inflation nowcasts (headline and core) from the Federal Reserve Bank of Cleveland — keyless, NOT a FRED series. Answers "what is the Cleveland Fed inflation nowcast", "current CPI estimate before the official release", "PCE inflation nowcast today". Returns month-over-month and year-over-year nowcasts for the current and prior month, plus quarterly annualized nowcasts for the current and next quarter. A blank value for a period/measure means the actual BLS (CPI) or BEA (PCE) release for that period has already been published, so the nowcast model stops estimating it. Updated every business day.',
+    summary: 'Today\'s Cleveland Fed CPI/PCE inflation nowcast — month, year, and quarterly annualized.',
+    inputSchema: { type: 'object' as const, properties: {} },
+  },
 ];
 
 // ── callTool dispatcher ─────────────────────────────────────────────────
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  if (name === 'nyfed_gdp_nowcast') return nyfedGdpNowcast(args);
+  if (name === 'cleveland_fed_inflation_nowcast') return clevelandInflationNowcast();
+
   const key = extractKey(args);
 
   switch (name) {
@@ -1386,6 +1421,246 @@ async function getRevisions(key: string, args: Record<string, unknown>) {
     first_release: revisions[0] ?? null,
     latest: revisions[revisions.length - 1] ?? null,
     revisions,
+  };
+}
+
+// ── nyfed_gdp_nowcast / cleveland_fed_inflation_nowcast (fleet #3239) ─────
+//
+// Neither series exists in FRED's own catalog — confirmed via fred_search
+// before building (no GDP-nowcast or inflation-nowcast series on either
+// bank). Both regional Feds publish the underlying data files directly on
+// their own sites with no API key, so these proxy those files live, per
+// request: no data at module scope, no copy kept between calls.
+
+async function fetchExternal(url: string, name: string): Promise<Response> {
+  const res = await fetchWithTimeout(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Pipeworx/1.0; +https://pipeworx.io)' } }, name, 8000);
+  if (!res.ok) throw await httpError(res, name);
+  return res;
+}
+
+// RFC4180-ish CSV parser (quoted fields, embedded commas/newlines, "" escape).
+// Both NY Fed CSVs below rely on this: the Note column's narrative sentences
+// contain literal commas inside quoted fields.
+function parseCsvRecords(text: string): string[][] {
+  const records: string[][] = [];
+  let field = '';
+  let record: string[] = [];
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      record.push(field); field = '';
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++;
+      record.push(field); field = ''; records.push(record); record = [];
+    } else {
+      field += ch;
+    }
+  }
+  if (field !== '' || record.length) { record.push(field); records.push(record); }
+  return records;
+}
+
+function parseCsvRows(text: string): Record<string, string>[] {
+  const records = parseCsvRecords(text);
+  if (!records.length) return [];
+  const header = records[0].map((h, i) => (i === 0 ? h.replace(/^﻿/, '') : h).trim());
+  const rows: Record<string, string>[] = [];
+  for (let i = 1; i < records.length; i++) {
+    const rec = records[i];
+    if (rec.length === 1 && rec[0].trim() === '') continue;
+    const row: Record<string, string> = {};
+    for (let c = 0; c < header.length; c++) row[header[c]] = (rec[c] ?? '').trim();
+    rows.push(row);
+  }
+  return rows;
+}
+
+const NYFED_NOWCAST_BASE = 'https://www.newyorkfed.org/medialibrary/Research/Interactives/Data/NowCast/data';
+
+// "16-Oct" + "2026" -> "2026-10-16". The CSV's Update column has no year of
+// its own; Year is a separate column on the same row.
+const MONTH_ABBR: Record<string, string> = {
+  jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+  jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+};
+function nyfedUpdateToIso(update: string, year: string): string | null {
+  const m = /^(\d{1,2})-([A-Za-z]{3})$/.exec(update.trim());
+  if (!m || !year) return null;
+  const mm = MONTH_ABBR[m[2].toLowerCase()];
+  if (!mm) return null;
+  return `${year}-${mm}-${m[1].padStart(2, '0')}`;
+}
+
+interface NyfedCurrentEstimate {
+  quarter: string;
+  nowcast_pct: number;
+  probability_interval_50_pct?: [number, number];
+  probability_interval_80_pct?: [number, number];
+}
+
+async function nyfedGdpNowcast(args: Record<string, unknown>) {
+  const includeHistory = args.include_history !== false;
+  const historyLimit = Math.min(20, Math.max(1, (args.history_quarters as number) ?? 6));
+
+  const metaRes = await fetchExternal(`${NYFED_NOWCAST_BASE}/nowcast-history-meta-data.csv`, 'New York Fed Staff Nowcast');
+  const metaRows = parseCsvRows(await metaRes.text());
+
+  // The row the bank itself flags as the quarter its weekly file currently
+  // tracks (it also carries the forward quarter's nowcast in its narrative
+  // text) — not "today's calendar quarter", which is wrong whenever GDP for
+  // the prior quarter hasn't been officially released yet.
+  const landing = metaRows.find((r) => r.landingQuarter === '1');
+  if (!landing) {
+    throw new Error('upstream_shape_changed: New York Fed Staff Nowcast history file has no row with landingQuarter=1 — the publisher may have changed this file\'s structure.');
+  }
+  const qNum = /Q(\d)/.exec(landing.quarter)?.[1];
+  if (!qNum || !landing.year) {
+    throw new Error(`upstream_shape_changed: could not parse the landing quarter from "${landing.year} ${landing.quarter}".`);
+  }
+  const quarterFile = `${landing.year}Q${qNum}.csv`;
+  const quarterRes = await fetchExternal(`${NYFED_NOWCAST_BASE}/${quarterFile}`, 'New York Fed Staff Nowcast');
+  const rows = parseCsvRows(await quarterRes.text());
+
+  // Narrative summary rows: empty Data Series, non-empty Note. The headline
+  // one states "... Nowcast for YYYY:QN is X.X% ...". Scan from the end so a
+  // row of blank FUTURE weeks (published in advance with empty cells) never
+  // wins over the latest actual update.
+  let headline: Record<string, string> | null = null;
+  const narrativeLines: string[] = [];
+  let headlineUpdate: string | null = null;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    if (r['Data Series'] || !r.Note) continue;
+    if (!headlineUpdate) {
+      if (!/Nowcast for \d{4}:Q\d is/.test(r.Note)) continue; // keep scanning for the headline row
+      headline = r;
+      headlineUpdate = r.Update;
+    }
+    if (r.Update !== headlineUpdate) break; // past the most recent week's narrative block
+    narrativeLines.unshift(r.Note);
+  }
+
+  if (!headline) {
+    return {
+      source: 'Federal Reserve Bank of New York, Staff Nowcast',
+      found: false,
+      note: `No published narrative row found in ${quarterFile} — the file may not have its first weekly update of the quarter yet.`,
+      landing_quarter: `${landing.year}:${landing.quarter}`,
+    };
+  }
+
+  const text = narrativeLines.join(' ');
+  const estimates: NyfedCurrentEstimate[] = [];
+  const qRe = /Nowcast for (\d{4}:Q\d) is (-?[0-9.]+)%/g;
+  let qm: RegExpExecArray | null;
+  while ((qm = qRe.exec(text))) {
+    estimates.push({ quarter: qm[1], nowcast_pct: Number(qm[2]) });
+  }
+  const p50 = /50% probability interval at \[(-?[0-9.]+), (-?[0-9.]+)\]/.exec(text);
+  const p80 = /80% interval at \[(-?[0-9.]+), (-?[0-9.]+)\]/.exec(text);
+  if (estimates.length) {
+    if (p50) estimates[0].probability_interval_50_pct = [Number(p50[1]), Number(p50[2])];
+    if (p80) estimates[0].probability_interval_80_pct = [Number(p80[1]), Number(p80[2])];
+  }
+
+  const asOf = nyfedUpdateToIso(headline.Update, headline.Year);
+
+  const concluded = metaRows
+    .filter((r) => r.concluded === '1')
+    .sort((a, b) => (b.year + b.quarter).localeCompare(a.year + a.quarter))
+    .slice(0, historyLimit)
+    .map((r) => ({
+      quarter: `${r.year}:${r.quarter}`,
+      final_nowcast_pct: r.finalNowcast ? Number(r.finalNowcast) : null,
+      final_nowcast_date: r.finalNowcastReleaseDate || null,
+      bea_advance_gdp_pct: r.advancedGDP ? Number(r.advancedGDP) : null,
+      bea_advance_release_date: r.advancedReleaseDate || null,
+      bea_latest_gdp_pct: r.latestGDP ? Number(r.latestGDP) : null,
+      bea_latest_release_date: r.latestReleaseDate || null,
+    }));
+
+  return {
+    source: 'Federal Reserve Bank of New York, Staff Nowcast',
+    found: true,
+    as_of: asOf,
+    current_estimates: estimates.length ? estimates : undefined,
+    ...(estimates.length === 0 ? { note: `Could not parse a quarter/percentage out of this week's narrative text; returning it raw. Raw narrative: "${text}"`, parsed: false } : {}),
+    narrative: text,
+    release_schedule: 'Updated each Friday (except federal holidays) at or shortly after 12:45 p.m. ET, using data available up to 10 a.m.',
+    ...(includeHistory ? { concluded_quarters_history: concluded } : {}),
+  };
+}
+
+const CFED_INFLATION_URL = 'https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting';
+
+interface CfedTableRow {
+  period: string;
+  cpi_pct: number | null;
+  core_cpi_pct: number | null;
+  pce_pct: number | null;
+  core_pce_pct: number | null;
+  updated: string | null;
+}
+
+function parseCfedTable(html: string, caption: string): CfedTableRow[] {
+  const capIdx = html.indexOf(`<caption>${caption}</caption>`);
+  if (capIdx === -1) return [];
+  const tbodyStart = html.indexOf('<tbody>', capIdx);
+  const tbodyEnd = html.indexOf('</tbody>', tbodyStart);
+  if (tbodyStart === -1 || tbodyEnd === -1) return [];
+  const body = html.slice(tbodyStart, tbodyEnd);
+  const rows: CfedTableRow[] = [];
+  const trRe = /<tr>(.*?)<\/tr>/gs;
+  let trm: RegExpExecArray | null;
+  while ((trm = trRe.exec(body))) {
+    const cells = [...trm[1].matchAll(/<td>(.*?)<\/td>/gs)].map((m) => m[1].trim());
+    if (cells.length < 6) continue;
+    const num = (s: string) => (s === '' ? null : Number(s));
+    rows.push({ period: cells[0], cpi_pct: num(cells[1]), core_cpi_pct: num(cells[2]), pce_pct: num(cells[3]), core_pce_pct: num(cells[4]), updated: cells[5] || null });
+  }
+  return rows;
+}
+
+async function clevelandInflationNowcast() {
+  const res = await fetchExternal(CFED_INFLATION_URL, 'Cleveland Fed Inflation Nowcasting');
+  const html = await res.text();
+
+  const monthlyMom = parseCfedTable(html, 'Inflation, month-over-month percent change');
+  const monthlyYoy = parseCfedTable(html, 'Inflation, year-over-year percent change');
+  const quarterly = parseCfedTable(html, 'Quarterly annualized percent change');
+
+  if (!monthlyMom.length && !monthlyYoy.length && !quarterly.length) {
+    throw new Error('upstream_shape_changed: Cleveland Fed Inflation Nowcasting page did not contain the expected data tables — the publisher may have changed the page layout.');
+  }
+
+  const headlineMonth = monthlyMom[0] ?? null;
+  const headlineYoy = monthlyYoy[0] ?? null;
+  const headlineQuarter = quarterly[0] ?? null;
+
+  return {
+    source: 'Federal Reserve Bank of Cleveland, Inflation Nowcasting',
+    found: true,
+    current: {
+      month: headlineMonth?.period ?? null,
+      updated: headlineMonth?.updated ?? null,
+      month_over_month_pct: headlineMonth ? { cpi: headlineMonth.cpi_pct, core_cpi: headlineMonth.core_cpi_pct, pce: headlineMonth.pce_pct, core_pce: headlineMonth.core_pce_pct } : null,
+      year_over_year_pct: headlineYoy ? { cpi: headlineYoy.cpi_pct, core_cpi: headlineYoy.core_cpi_pct, pce: headlineYoy.pce_pct, core_pce: headlineYoy.core_pce_pct } : null,
+      quarter: headlineQuarter?.period ?? null,
+      quarterly_annualized_pct: headlineQuarter ? { cpi: headlineQuarter.cpi_pct, core_cpi: headlineQuarter.core_cpi_pct, pce: headlineQuarter.pce_pct, core_pce: headlineQuarter.core_pce_pct } : null,
+    },
+    methodology_note: 'A blank value for a period/measure means the actual BLS (CPI) or BEA (PCE) release for that period has already been published, so the nowcast model stops estimating it — check the headline series\' source data directly (e.g. fred_get_series) for the released figure.',
+    monthly_month_over_month: monthlyMom,
+    monthly_year_over_year: monthlyYoy,
+    quarterly_annualized: quarterly,
   };
 }
 
