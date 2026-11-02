@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-fred",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "FRED MCP — Federal Reserve Economic Data (St. Louis Fed)",
   "type": "module",
   "main": "lib/index.js",
@@ -27,7 +27,7 @@
     "mode": "gateway",
     "slug": "fred",
     "gatewaySlug": "fred",
-    "sourceHash": "v1-88f8e4871cb086b1666357b6a09f9a2784f7e16badddd0da82cdae93cb86dfe2",
-    "sourceCommit": "bb047243cf27f32453103de186b8e6a8b6a1ce79"
+    "sourceHash": "v1-b6b26888458a2540c9ae87a215ef2433579c3c2f1c17fd34d6daa5d1b650d3a1",
+    "sourceCommit": "030233f6b150a38a44421f88a5fcbad123f0fea8"
   }
 }
